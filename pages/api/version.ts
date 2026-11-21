@@ -1,9 +1,7 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
 import packageJson from '@/package.json';
 import cache from '@/utils/cache';
 import type { NextApiRequest, NextApiResponse } from 'next';
+import Parser from 'rss-parser';
 import semver from 'semver';
 
 type ChangelogRelease = {
@@ -21,6 +19,8 @@ type VersionResponse = {
 
 const CACHE_TTL = 60 * 60;
 const VERSION_CACHE_KEY = 'orbit:github:version';
+const CHANGELOG_FEED_URL = 'https://lumenate.usercue.app/api/changelog/rss';
+const rssParser = new Parser();
 
 const CHANNEL_RANK: Record<string, number> = {
   beta: 0,
@@ -31,7 +31,7 @@ const CHANNEL_RANK: Record<string, number> = {
 function normalizeVersion(version: string): string {
   return version
     .trim()
-    .replace(/^v/, '')
+    .replace(/^v/i, '')
     .replace(
       /^(\d+\.\d+\.\d+)(beta|nightly)(?:[.-]?(\d+))?$/i,
       (_, base, channel, number) => `${base}-${channel.toLowerCase()}${number ? `.${number}` : ''}`,
@@ -91,34 +91,50 @@ function compareVersions(a: string, b: string): number {
   return parsedA.channelNumber - parsedB.channelNumber;
 }
 
-function getChangelog(): ChangelogRelease[] {
-  const changelogPath = path.join(process.cwd(), 'CHANGELOG.md');
-  const contents = fs.readFileSync(changelogPath, 'utf8');
+function extractChanges(content: string): string[] {
+  const text = content
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:li|p|div|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'");
 
-  const releaseRegex = /^## \[([^\]]+)\]\s*-\s*(\d{4}-\d{2}-\d{2})\s*$/gm;
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^(?:[-*•]|\d+\.)\s*/, ''))
+    .filter(Boolean);
+}
 
-  const matches = [...contents.matchAll(releaseRegex)];
+async function getChangelog(): Promise<ChangelogRelease[]> {
+  const response = await fetch(CHANGELOG_FEED_URL, {
+    headers: { Accept: 'application/rss+xml, application/xml, text/xml' },
+    signal: AbortSignal.timeout(10_000),
+  });
 
-  return matches.slice(0, 5).map((match, index) => {
-    const version = match[1];
-    const date = match[2];
+  if (!response.ok) {
+    throw new Error(`Changelog feed returned ${response.status}`);
+  }
 
-    const start = (match.index ?? 0) + match[0].length;
-    const end = matches[index + 1]?.index ?? contents.length;
+  const feed = await rssParser.parseString(await response.text());
 
-    const section = contents.slice(start, end);
-
-    const changes = section
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => /^-\s+/.test(line))
-      .map((line) => line.replace(/^-\s+/, '').trim())
-      .filter(Boolean);
+  return feed.items.slice(0, 5).map((item) => {
+    const title = item.title?.trim() ?? 'Changelog';
+    const versionMatch = title.match(/v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/i);
+    const publishedDate = item.isoDate ?? item.pubDate;
+    const parsedDate = publishedDate ? new Date(publishedDate) : null;
+    const date = parsedDate && !Number.isNaN(parsedDate.getTime())
+      ? parsedDate.toISOString().slice(0, 10)
+      : '';
+    const content = item.content ?? item.contentSnippet ?? item.summary ?? '';
 
     return {
-      version,
+      version: versionMatch ? normalizeVersion(versionMatch[1]) : title,
       date,
-      changes,
+      changes: extractChanges(content),
     };
   });
 }
@@ -134,7 +150,13 @@ export default async function handler(
   }
 
   const current = packageJson.version;
-  const changelog = getChangelog();
+  let changelog: ChangelogRelease[] = [];
+
+  try {
+    changelog = await getChangelog();
+  } catch (error) {
+    console.error('[VERSION] Failed to fetch changelog feed:', error);
+  }
 
   try {
     let latest = await cache.get<string>(VERSION_CACHE_KEY);
