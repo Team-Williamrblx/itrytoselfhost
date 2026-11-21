@@ -2,7 +2,7 @@
 
 Orbit's changelog is provided by these RSS feeds:
 
-- Starcat (default): https://starcat.usercue.app/api/changelog/rss
+- Starcat (default): feedback.starcat.cc.cd/api/changelog/rss
 - Wills: https://lumenate.usercue.app/api/changelog/rss
 - Orbit: https://feedback.planetaryapp.cloud/api/changelog/rss
 
