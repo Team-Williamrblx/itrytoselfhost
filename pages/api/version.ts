@@ -8,6 +8,7 @@ type ChangelogRelease = {
   version: string;
   date: string;
   changes: string[];
+  image?: string;
 };
 
 type VersionResponse = {
@@ -93,6 +94,23 @@ function extractChanges(content: string): string[] {
     .filter(Boolean);
 }
 
+function getSafeImageUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.protocol === 'https:' ? parsedUrl.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getItemImage(item: Parser.Item): string | undefined {
+  const enclosureUrl = item.enclosure?.url;
+  const htmlContent = item.content ?? item.contentSnippet ?? item.summary ?? '';
+  const imageMatch = htmlContent.match(/<img\b[^>]*\bsrc=["']([^"']+)["']/i);
+  return getSafeImageUrl(enclosureUrl ?? imageMatch?.[1]);
+}
+
 async function getChangelog(source: ChangelogSource): Promise<ChangelogRelease[]> {
   const response = await fetch(CHANGELOG_FEEDS[source], {
     headers: { Accept: 'application/rss+xml, application/xml, text/xml' },
@@ -115,6 +133,7 @@ async function getChangelog(source: ChangelogSource): Promise<ChangelogRelease[]
       version: versionMatch ? normalizeVersion(versionMatch[1]) : title,
       date,
       changes: extractChanges(content),
+      image: getItemImage(item),
     };
   });
 }
