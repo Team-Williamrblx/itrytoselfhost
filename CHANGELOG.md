@@ -1,7 +1,9 @@
 # Changelog
 
-Orbit's changelog is maintained in the RSS feed served at:
+Orbit's changelog is provided by these RSS feeds:
 
-https://lumenate.usercue.app/api/changelog/rss
+- Starcat (default): https://starcat.usercue.app/api/changelog/rss
+- Wills: https://lumenate.usercue.app/api/changelog/rss
+- Orbit: https://feedback.planetaryapp.cloud/api/changelog/rss
 
-The application fetches this feed to display recent release notes.
+The application fetches the selected feed to display recent release notes.

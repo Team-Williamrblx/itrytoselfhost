@@ -19,7 +19,12 @@ type VersionResponse = {
 
 const CACHE_TTL = 60 * 60;
 const VERSION_CACHE_KEY = 'orbit:github:version';
-const CHANGELOG_FEED_URL = 'https://lumenate.usercue.app/api/changelog/rss';
+const CHANGELOG_FEEDS = {
+  starcat: 'https://starcat.usercue.app/api/changelog/rss',
+  wills: 'https://lumenate.usercue.app/api/changelog/rss',
+  orbit: 'https://feedback.planetaryapp.cloud/api/changelog/rss',
+} as const;
+type ChangelogSource = keyof typeof CHANGELOG_FEEDS;
 const rssParser = new Parser();
 
 const CHANNEL_RANK: Record<string, number> = {
@@ -39,55 +44,34 @@ function normalizeVersion(version: string): string {
 }
 
 function parseVersion(version: string) {
-  const normalized = normalizeVersion(version);
-  const parsed = semver.parse(normalized);
-
-  if (!parsed) {
-    return null;
-  }
+  const parsed = semver.parse(normalizeVersion(version));
+  if (!parsed) return null;
 
   const prerelease = parsed.prerelease;
-
   let channel = 'stable';
   let channelNumber = 0;
 
   if (typeof prerelease[0] === 'string') {
     channel = prerelease[0].toLowerCase();
-
-    if (typeof prerelease[1] === 'number') {
-      channelNumber = prerelease[1];
-    }
+    if (typeof prerelease[1] === 'number') channelNumber = prerelease[1];
   }
 
-  return {
-    parsed,
-    channel,
-    channelRank: CHANNEL_RANK[channel] ?? -1,
-    channelNumber,
-  };
+  return { parsed, channelRank: CHANNEL_RANK[channel] ?? -1, channelNumber };
 }
 
 function compareVersions(a: string, b: string): number {
   const parsedA = parseVersion(a);
   const parsedB = parseVersion(b);
+  if (!parsedA || !parsedB) return 0;
 
-  if (!parsedA || !parsedB) {
-    return 0;
-  }
-
-  const baseA = `${parsedA.parsed.major}.${parsedA.parsed.minor}.${parsedA.parsed.patch}`;
-  const baseB = `${parsedB.parsed.major}.${parsedB.parsed.minor}.${parsedB.parsed.patch}`;
-
-  const baseComparison = semver.compare(baseA, baseB);
-
-  if (baseComparison !== 0) {
-    return baseComparison;
-  }
-
+  const baseComparison = semver.compare(
+    `${parsedA.parsed.major}.${parsedA.parsed.minor}.${parsedA.parsed.patch}`,
+    `${parsedB.parsed.major}.${parsedB.parsed.minor}.${parsedB.parsed.patch}`,
+  );
+  if (baseComparison !== 0) return baseComparison;
   if (parsedA.channelRank !== parsedB.channelRank) {
     return parsedA.channelRank - parsedB.channelRank;
   }
-
   return parsedA.channelNumber - parsedB.channelNumber;
 }
 
@@ -109,18 +93,14 @@ function extractChanges(content: string): string[] {
     .filter(Boolean);
 }
 
-async function getChangelog(): Promise<ChangelogRelease[]> {
-  const response = await fetch(CHANGELOG_FEED_URL, {
+async function getChangelog(source: ChangelogSource): Promise<ChangelogRelease[]> {
+  const response = await fetch(CHANGELOG_FEEDS[source], {
     headers: { Accept: 'application/rss+xml, application/xml, text/xml' },
     signal: AbortSignal.timeout(10_000),
   });
-
-  if (!response.ok) {
-    throw new Error(`Changelog feed returned ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Changelog feed returned ${response.status}`);
 
   const feed = await rssParser.parseString(await response.text());
-
   return feed.items.slice(0, 5).map((item) => {
     const title = item.title?.trim() ?? 'Changelog';
     const versionMatch = title.match(/v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/i);
@@ -144,23 +124,24 @@ export default async function handler(
   res: NextApiResponse<VersionResponse | { error: string }>,
 ) {
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      error: 'Method not allowed',
-    });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const requestedSource = req.query.source;
+  const source = typeof requestedSource === 'string' && requestedSource in CHANGELOG_FEEDS
+    ? (requestedSource as ChangelogSource)
+    : 'starcat';
   const current = packageJson.version;
   let changelog: ChangelogRelease[] = [];
 
   try {
-    changelog = await getChangelog();
+    changelog = await getChangelog(source);
   } catch (error) {
-    console.error('[VERSION] Failed to fetch changelog feed:', error);
+    console.error(`[VERSION] Failed to fetch ${source} changelog feed:`, error);
   }
 
   try {
     let latest = await cache.get<string>(VERSION_CACHE_KEY);
-
     if (!latest) {
       const response = await fetch(
         'https://api.github.com/repos/PlanetaryOrbit/orbit/releases?per_page=1',
@@ -171,48 +152,31 @@ export default async function handler(
           },
         },
       );
-
-      if (!response.ok) {
-        throw new Error(`GitHub returned ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
 
       const releases = await response.json();
-
       if (!Array.isArray(releases) || releases.length === 0) {
         throw new Error('No Orbit releases found');
       }
 
       const release = releases[0];
-
       if (release.draft || typeof release.tag_name !== 'string') {
         throw new Error('Invalid latest Orbit release');
       }
 
       latest = normalizeVersion(release.tag_name);
-
-      if (!semver.valid(latest)) {
-        throw new Error(`Invalid Orbit version: ${latest}`);
-      }
-
+      if (!semver.valid(latest)) throw new Error(`Invalid Orbit version: ${latest}`);
       await cache.set(VERSION_CACHE_KEY, latest, CACHE_TTL);
     }
-
-    const outdated = compareVersions(current, latest) !== 0;
 
     return res.status(200).json({
       current,
       latest,
-      outdated,
+      outdated: compareVersions(current, latest) !== 0,
       changelog,
     });
   } catch (error) {
     console.error('[VERSION] Failed to check GitHub version:', error);
-
-    return res.status(200).json({
-      current,
-      latest: null,
-      outdated: false,
-      changelog,
-    });
+    return res.status(200).json({ current, latest: null, outdated: false, changelog });
   }
 }
